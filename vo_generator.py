@@ -132,6 +132,109 @@ def ensure_wav_extension(filename: str) -> str:
     return base + ".wav"
 
 
+# ─── Web UI API ───────────────────────────────────────────────
+
+class GenerationAborted(Exception):
+    pass
+
+
+def inspect_docx(path: str) -> dict:
+    """Return table structure for UI column mapping."""
+    path = os.path.abspath(os.path.expanduser(path))
+    doc = Document(path)
+    tables = []
+    for i, table in enumerate(doc.tables):
+        if not table.rows:
+            continue
+        headers = [cell.text.strip() for cell in table.rows[0].cells]
+        headers_lower = [h.lower() for h in headers]
+
+        vo_guess = next((j for j, h in enumerate(headers_lower) if "vo draft" in h), None)
+        if vo_guess is None:
+            vo_guess = next((j for j, h in enumerate(headers_lower) if "vo" in h or "draft" in h), None)
+        file_guess = next((j for j, h in enumerate(headers_lower) if "audio file" in h), None)
+        if file_guess is None:
+            file_guess = next((j for j, h in enumerate(headers_lower) if "audio" in h or "file" in h), None)
+
+        preview = []
+        for row in table.rows[1:6]:
+            preview.append([cell.text.strip() for cell in row.cells])
+
+        tables.append({
+            "index": i,
+            "column_count": len(headers),
+            "row_count": len(table.rows),
+            "headers": headers,
+            "preview": preview,
+            "suggested_vo_col": vo_guess,
+            "suggested_file_col": file_guess,
+        })
+
+    return {"tables": tables, "path": path, "filename": os.path.basename(path)}
+
+
+def generate_from_table(
+    path: str,
+    table_idx: int,
+    vo_col: int,
+    file_col: int,
+    header_rows: int,
+    api_key: str,
+    voice_name: str,
+    progress_cb,
+):
+    """Generate audio for each row, calling progress_cb with status dicts."""
+    path = os.path.abspath(os.path.expanduser(path))
+    doc = Document(path)
+    table = doc.tables[table_idx]
+
+    rows = []
+    for row in table.rows[header_rows:]:
+        vo_text = row.cells[vo_col].text.strip()
+        audio_name = row.cells[file_col].text.strip()
+        if vo_text and audio_name:
+            rows.append({"vo_text": vo_text, "audio_file": audio_name})
+
+    doc_stem = os.path.splitext(os.path.basename(path))[0]
+    output_dir = os.path.join(os.path.dirname(path), f"{doc_stem}_audio")
+    os.makedirs(output_dir, exist_ok=True)
+
+    try:
+        voice_id = find_voice_id(api_key, voice_name)
+    except Exception as e:
+        progress_cb({"type": "error", "message": str(e)})
+        return
+
+    total = len(rows)
+    progress_cb({"type": "start", "total": total, "output_dir": output_dir, "voice": voice_name})
+
+    successes = 0
+    failures = 0
+
+    for i, row in enumerate(rows, 1):
+        fname = ensure_wav_extension(row["audio_file"])
+        out_path = os.path.join(output_dir, fname)
+
+        try:
+            progress_cb({"type": "progress", "current": i, "total": total, "filename": fname, "status": "generating"})
+            pcm_data = generate_speech(api_key, voice_id, row["vo_text"])
+            pcm_to_wav(pcm_data, out_path)
+            duration = round(len(pcm_data) / (SAMPLE_RATE * SAMPLE_WIDTH * CHANNELS), 1)
+            progress_cb({"type": "progress", "current": i, "total": total, "filename": fname, "status": "done", "duration": duration})
+            successes += 1
+        except GenerationAborted:
+            progress_cb({"type": "aborted", "message": f"Aborted after {i - 1} file(s)"})
+            return
+        except Exception as e:
+            progress_cb({"type": "progress", "current": i, "total": total, "filename": fname, "status": "failed", "error": str(e)})
+            failures += 1
+
+        if i < total:
+            time.sleep(0.5)
+
+    progress_cb({"type": "done", "successes": successes, "failures": failures, "output_dir": output_dir})
+
+
 # ─── Main ─────────────────────────────────────────────────────
 
 def main():
