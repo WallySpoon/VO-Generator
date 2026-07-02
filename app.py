@@ -6,19 +6,28 @@ Run with: python3 app.py  (or via the `vogen` alias)
 import json
 import os
 import queue
+import shutil
 import socket
+import tempfile
 import threading
 import uuid
 import webbrowser
+import zipfile
 
 from dotenv import load_dotenv, set_key
-from flask import Flask, Response, jsonify, render_template, request, stream_with_context
+from flask import Flask, Response, jsonify, render_template, request, send_file, stream_with_context
+from werkzeug.utils import secure_filename
 
 from vo_generator import GenerationAborted, generate_from_table, inspect_docx
 
 load_dotenv()
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 32 * 1024 * 1024  # 32 MB upload limit
+
+ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
+UPLOAD_DIR = os.path.join(tempfile.gettempdir(), "vo-generator-uploads")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 _jobs = {}
 _jobs_lock = threading.Lock()
@@ -26,7 +35,8 @@ _jobs_lock = threading.Lock()
 PORT = 5000
 
 
-ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
+def in_docker():
+    return os.path.exists("/.dockerenv")
 
 
 @app.route("/")
@@ -46,7 +56,6 @@ def setup():
     if not api_key:
         return jsonify({"error": "No API key provided"}), 400
 
-    # Validate the key against ElevenLabs before saving
     import requests as req
     try:
         resp = req.get(
@@ -60,34 +69,42 @@ def setup():
     except Exception as e:
         return jsonify({"error": f"Could not reach ElevenLabs to validate key: {e}"}), 400
 
-    # Save to .env and update the running process
     set_key(ENV_PATH, "ELEVENLABS_API_KEY", api_key)
     os.environ["ELEVENLABS_API_KEY"] = api_key
     return jsonify({"status": "ok"})
 
 
-@app.route("/inspect", methods=["POST"])
-def inspect():
-    data = request.get_json(force=True)
-    path = (data.get("path") or "").strip()
-    if not path:
-        return jsonify({"error": "No path provided"}), 400
+@app.route("/upload", methods=["POST"])
+def upload():
+    if "file" not in request.files:
+        return jsonify({"error": "No file provided"}), 400
+    f = request.files["file"]
+    if not f.filename.lower().endswith(".docx"):
+        return jsonify({"error": "Only .docx files are supported currently"}), 422
 
-    resolved = os.path.abspath(os.path.expanduser(path))
-    if not os.path.isfile(resolved):
-        return jsonify({"error": f"File not found: {resolved}"}), 400
+    session_id = str(uuid.uuid4())
+    session_dir = os.path.join(UPLOAD_DIR, session_id)
+    os.makedirs(session_dir, exist_ok=True)
 
-    ext = os.path.splitext(resolved)[1].lower()
-    if ext != ".docx":
-        return jsonify({"error": f"Unsupported file type '{ext}' — only .docx is supported currently."}), 422
+    filename = secure_filename(f.filename)
+    doc_path = os.path.join(session_dir, filename)
+    f.save(doc_path)
 
     try:
-        result = inspect_docx(resolved)
+        result = inspect_docx(doc_path)
     except Exception as e:
+        shutil.rmtree(session_dir, ignore_errors=True)
         return jsonify({"error": str(e)}), 500
 
     if not result["tables"]:
-        return jsonify({"error": "No tables found in this document."}), 422
+        shutil.rmtree(session_dir, ignore_errors=True)
+        return jsonify({"error": "No tables found in this document"}), 422
+
+    result["session_id"] = session_id
+    result["doc_path"] = doc_path
+
+    # Auto-cleanup session after 1 hour
+    threading.Timer(3600, lambda: shutil.rmtree(session_dir, ignore_errors=True)).start()
 
     return jsonify(result)
 
@@ -96,9 +113,9 @@ def inspect():
 def generate():
     data = request.get_json(force=True)
 
-    path = (data.get("path") or "").strip()
-    if not path or not os.path.isfile(path):
-        return jsonify({"error": "File not found"}), 400
+    doc_path = (data.get("doc_path") or "").strip()
+    if not doc_path or not os.path.isfile(doc_path):
+        return jsonify({"error": "Uploaded file not found — please re-upload"}), 400
 
     try:
         table_idx = int(data.get("table_idx", 0))
@@ -112,11 +129,14 @@ def generate():
     api_key = (data.get("api_key") or "").strip() or os.environ.get("ELEVENLABS_API_KEY")
 
     if not api_key:
-        return jsonify({"error": "No API key — add ELEVENLABS_API_KEY to .env or enter it in the form."}), 400
+        return jsonify({"error": "No API key — complete setup first"}), 400
+
+    audio_dir = os.path.join(os.path.dirname(doc_path), "audio")
+    os.makedirs(audio_dir, exist_ok=True)
 
     job_id = str(uuid.uuid4())
     q = queue.Queue(maxsize=500)
-    job = {"queue": q, "aborted": False}
+    job = {"queue": q, "aborted": False, "audio_dir": audio_dir}
 
     with _jobs_lock:
         _jobs[job_id] = job
@@ -132,8 +152,9 @@ def generate():
     def run():
         try:
             generate_from_table(
-                path, table_idx, vo_col, file_col,
+                doc_path, table_idx, vo_col, file_col,
                 header_rows, api_key, voice_name, progress_cb,
+                output_dir=audio_dir,
             )
         except Exception as e:
             try:
@@ -178,6 +199,29 @@ def stream(job_id):
     )
 
 
+@app.route("/download/<job_id>")
+def download(job_id):
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Unknown job or already expired"}), 404
+
+    audio_dir = job.get("audio_dir")
+    if not audio_dir or not os.path.isdir(audio_dir):
+        return jsonify({"error": "Audio files not found"}), 404
+
+    wav_files = [f for f in os.listdir(audio_dir) if f.endswith(".wav")]
+    if not wav_files:
+        return jsonify({"error": "No .wav files were generated"}), 404
+
+    zip_path = audio_dir + ".zip"
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for fname in sorted(wav_files):
+            zf.write(os.path.join(audio_dir, fname), fname)
+
+    return send_file(zip_path, as_attachment=True, download_name="vo_audio.zip")
+
+
 @app.route("/abort/<job_id>", methods=["POST"])
 def abort(job_id):
     with _jobs_lock:
@@ -189,13 +233,14 @@ def abort(job_id):
 
 
 if __name__ == "__main__":
-    # macOS AirPlay Receiver also uses port 5000 — catch the conflict early
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         if s.connect_ex(("127.0.0.1", PORT)) == 0:
             print(f"\nERROR: Port {PORT} is already in use.")
             print(f"  Kill the conflicting process with: lsof -ti:{PORT} | xargs kill\n")
             raise SystemExit(1)
 
-    threading.Timer(1.2, lambda: webbrowser.open(f"http://localhost:{PORT}")).start()
+    if not in_docker():
+        threading.Timer(1.2, lambda: webbrowser.open(f"http://localhost:{PORT}")).start()
+
     print(f"\n  VO Generator running at http://localhost:{PORT}\n")
-    app.run(host="127.0.0.1", port=PORT, debug=False, threaded=True)
+    app.run(host="0.0.0.0", port=PORT, debug=False, threaded=True)

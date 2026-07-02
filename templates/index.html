@@ -51,13 +51,24 @@
         }
         .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 16px; }
         .form-group { margin-bottom: 16px; }
-        .tip { font-size: 0.78rem; color: #9ca3af; margin-top: 7px; line-height: 1.5; }
+
+        /* Upload zone */
+        .upload-zone {
+            border: 2px dashed #e5e7eb; border-radius: 10px;
+            padding: 36px 24px; text-align: center; cursor: pointer;
+            transition: border-color 0.2s, background 0.2s;
+        }
+        .upload-zone:hover, .upload-zone.drag-over { border-color: #4f46e5; background: #f5f3ff; }
+        .upload-icon { font-size: 2rem; margin-bottom: 8px; }
+        .upload-text { font-size: 0.9rem; color: #6b7280; }
+        .upload-name { font-size: 0.875rem; font-weight: 600; color: #4f46e5; margin-top: 10px; }
 
         .btn {
             display: inline-flex; align-items: center; gap: 6px;
             padding: 9px 18px; border-radius: 8px;
             font-size: 0.9rem; font-weight: 600; border: none; cursor: pointer;
             transition: background 0.15s, transform 0.1s, opacity 0.15s;
+            text-decoration: none;
         }
         .btn:active:not(:disabled) { transform: scale(0.97); }
         .btn:disabled { opacity: 0.45; cursor: not-allowed; }
@@ -69,7 +80,7 @@
         .btn-red:hover:not(:disabled) { background: #b91c1c; }
         .btn-ghost { background: transparent; color: #6b7280; border: 1.5px solid #e5e7eb; }
         .btn-ghost:hover:not(:disabled) { background: #f9fafb; color: #374151; }
-        .btn-row { display: flex; gap: 10px; align-items: center; margin-top: 20px; }
+        .btn-row { display: flex; gap: 10px; align-items: center; margin-top: 20px; flex-wrap: wrap; }
 
         .alert { padding: 10px 14px; border-radius: 8px; font-size: 0.875rem; margin-top: 12px; display: none; }
         .alert-error { background: #fef2f2; border: 1px solid #fecaca; color: #dc2626; }
@@ -101,13 +112,11 @@
         .log-file { font-size: 0.875rem; font-weight: 500; color: #111827; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .log-detail { font-size: 0.78rem; color: #9ca3af; margin-top: 1px; }
 
-        .done-banner { background: #f0fdf4; border: 1px solid #86efac; border-radius: 8px; padding: 14px 18px; margin-top: 16px; display: none; }
-        .done-banner h3 { color: #15803d; font-size: 0.95rem; font-weight: 600; margin-bottom: 4px; }
-        .done-banner p { color: #4b5563; font-size: 0.83rem; }
-        .done-banner code { font-family: monospace; font-size: 0.82rem; color: #374151; word-break: break-all; }
+        .done-banner { background: #f0fdf4; border: 1px solid #86efac; border-radius: 8px; padding: 18px; margin-top: 16px; display: none; text-align: center; }
+        .done-banner h3 { color: #15803d; font-size: 1rem; font-weight: 600; margin-bottom: 6px; }
+        .done-banner p { color: #4b5563; font-size: 0.85rem; margin-bottom: 14px; }
 
         .link-btn { background: none; border: none; color: #4f46e5; font-size: 0.8rem; cursor: pointer; padding: 0; text-decoration: underline; }
-
         .hidden { display: none !important; }
     </style>
 </head>
@@ -144,21 +153,24 @@
         <div class="alert alert-error" id="err-setup"></div>
     </div>
 
-    <!-- Step 1: Document -->
-    <div class="card" id="card-inspect">
+    <!-- Step 1: Upload -->
+    <div class="card hidden" id="card-inspect">
         <div class="card-header">
             <div class="step-badge">1</div>
             <div class="card-title">Document</div>
         </div>
-        <div class="form-group">
-            <label for="docx-path">File path</label>
-            <input type="text" id="docx-path" placeholder="/Users/you/Documents/script.docx" spellcheck="false" autocomplete="off">
+        <div class="upload-zone" id="upload-zone"
+             onclick="document.getElementById('file-input').click()"
+             ondragover="onDragOver(event)"
+             ondragleave="onDragLeave(event)"
+             ondrop="onDrop(event)">
+            <div class="upload-icon">📄</div>
+            <div class="upload-text">Drop your .docx here, or click to browse</div>
+            <div class="upload-name hidden" id="upload-name"></div>
+            <input type="file" id="file-input" accept=".docx" style="display:none" onchange="onFileSelect(event)">
         </div>
-        <p class="tip">
-            macOS tip: Right-click the file in Finder → <strong>Copy as Pathname</strong>, then paste here.
-        </p>
         <div class="btn-row">
-            <button class="btn btn-primary" id="btn-inspect" onclick="doInspect()">Inspect Document</button>
+            <button class="btn btn-primary" id="btn-inspect" onclick="doUpload()">Inspect Document</button>
         </div>
         <div class="alert alert-error" id="err-inspect"></div>
     </div>
@@ -192,7 +204,7 @@
         <div style="margin-bottom:16px;">
             <button class="link-btn" onclick="toggleApiKey()" id="api-key-toggle">+ Override API key</button>
             <div class="form-group hidden" id="api-key-field" style="margin-top:10px;">
-                <label for="inp-api-key">API key (leave blank to use .env)</label>
+                <label for="inp-api-key">API key (leave blank to use saved key)</label>
                 <input type="password" id="inp-api-key" placeholder="sk-…">
             </div>
         </div>
@@ -228,8 +240,10 @@
         <div class="log" id="log"></div>
         <div class="done-banner" id="done-banner">
             <h3>Generation complete</h3>
-            <p id="done-summary" style="margin-bottom:6px;"></p>
-            <p>Files saved to: <code id="done-path"></code></p>
+            <p id="done-summary"></p>
+            <a class="btn btn-primary" id="btn-download" href="#" download="vo_audio.zip">
+                ⬇ Download .wav files
+            </a>
         </div>
         <div class="btn-row">
             <button class="btn btn-red hidden" id="btn-abort" onclick="doAbort()">Abort</button>
@@ -239,7 +253,19 @@
 </div>
 
 <script>
-const state = { inspectResult: null, resolvedPath: null, jobId: null, es: null };
+const state = {
+    inspectResult: null,
+    docPath: null,
+    sessionId: null,
+    jobId: null,
+    es: null,
+    selectedFile: null,
+};
+
+function show(id) { document.getElementById(id).classList.remove('hidden'); }
+function hide(id) { document.getElementById(id).classList.add('hidden'); }
+function showErr(id, msg) { const el = document.getElementById(id); el.textContent = msg; el.style.display = 'block'; }
+function clearErr(id) { document.getElementById(id).style.display = 'none'; }
 
 // ── First-run setup check ─────────────────────────────
 (async () => {
@@ -247,7 +273,8 @@ const state = { inspectResult: null, resolvedPath: null, jobId: null, es: null }
     const data = await res.json();
     if (!data.has_key) {
         show('card-setup');
-        hide('card-inspect');
+    } else {
+        show('card-inspect');
     }
 })();
 
@@ -272,28 +299,42 @@ async function doSetup() {
     }
 }
 
-function show(id) { document.getElementById(id).classList.remove('hidden'); }
-function hide(id) { document.getElementById(id).classList.add('hidden'); }
-function showErr(id, msg) { const el = document.getElementById(id); el.textContent = msg; el.style.display = 'block'; }
-function clearErr(id) { document.getElementById(id).style.display = 'none'; }
+// ── File upload ────────────────────────────────────────
+function onDragOver(e) { e.preventDefault(); document.getElementById('upload-zone').classList.add('drag-over'); }
+function onDragLeave(e) { document.getElementById('upload-zone').classList.remove('drag-over'); }
+function onDrop(e) {
+    e.preventDefault();
+    document.getElementById('upload-zone').classList.remove('drag-over');
+    const file = e.dataTransfer?.files[0];
+    if (file) setFile(file);
+}
+function onFileSelect(e) { if (e.target.files[0]) setFile(e.target.files[0]); }
+function setFile(file) {
+    if (!file.name.toLowerCase().endsWith('.docx')) {
+        showErr('err-inspect', 'Only .docx files are supported.');
+        return;
+    }
+    state.selectedFile = file;
+    const nameEl = document.getElementById('upload-name');
+    nameEl.textContent = file.name;
+    nameEl.classList.remove('hidden');
+    clearErr('err-inspect');
+}
 
-document.getElementById('docx-path').addEventListener('keydown', e => { if (e.key === 'Enter') doInspect(); });
-
-async function doInspect() {
-    const path = document.getElementById('docx-path').value.trim();
-    if (!path) { showErr('err-inspect', 'Please enter a file path.'); return; }
+async function doUpload() {
+    if (!state.selectedFile) { showErr('err-inspect', 'Please select a file first.'); return; }
     clearErr('err-inspect');
     const btn = document.getElementById('btn-inspect');
-    btn.disabled = true; btn.textContent = 'Inspecting…';
+    btn.disabled = true; btn.textContent = 'Uploading…';
+    const formData = new FormData();
+    formData.append('file', state.selectedFile);
     try {
-        const res = await fetch('/inspect', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ path }),
-        });
+        const res = await fetch('/upload', { method: 'POST', body: formData });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || `Server error ${res.status}`);
         state.inspectResult = data;
-        state.resolvedPath = data.path;
+        state.docPath = data.doc_path;
+        state.sessionId = data.session_id;
         renderStep2(data);
         show('card-configure');
         document.getElementById('card-configure').scrollIntoView({ behavior: 'smooth' });
@@ -304,6 +345,7 @@ async function doInspect() {
     }
 }
 
+// ── Step 2: Configure ─────────────────────────────────
 function renderStep2(data) {
     const table = data.tables[0];
     const headers = table.headers;
@@ -358,12 +400,14 @@ function toggleApiKey() {
 
 function goBack() { hide('card-configure'); }
 
+// ── Step 3: Generate ──────────────────────────────────
 async function doGenerate() {
     clearErr('err-generate');
     const btn = document.getElementById('btn-generate');
     btn.disabled = true;
     const body = {
-        path: state.resolvedPath,
+        doc_path: state.docPath,
+        session_id: state.sessionId,
         table_idx: 0,
         vo_col: parseInt(document.getElementById('sel-vo-col').value),
         file_col: parseInt(document.getElementById('sel-file-col').value),
@@ -440,8 +484,8 @@ function handleEvent(msg) {
         label.textContent = 'Done';
         current.textContent = '';
         document.getElementById('done-summary').textContent =
-            `${msg.successes} succeeded${msg.failures ? `, ${msg.failures} failed` : ''}.`;
-        document.getElementById('done-path').textContent = msg.output_dir;
+            `${msg.successes} file${msg.successes !== 1 ? 's' : ''} generated${msg.failures ? `, ${msg.failures} failed` : ''}.`;
+        document.getElementById('btn-download').href = `/download/${state.jobId}`;
         document.getElementById('done-banner').style.display = 'block';
         hide('btn-abort');
         show('btn-new');
@@ -475,10 +519,11 @@ async function doAbort() {
 
 function startOver() {
     if (state.es) state.es.close();
-    Object.assign(state, { inspectResult: null, resolvedPath: null, jobId: null, es: null });
+    Object.assign(state, { inspectResult: null, docPath: null, sessionId: null, jobId: null, es: null, selectedFile: null });
     hide('card-configure'); hide('card-progress');
     document.getElementById('btn-generate').disabled = false;
-    document.getElementById('docx-path').value = '';
+    document.getElementById('upload-name').classList.add('hidden');
+    document.getElementById('file-input').value = '';
     window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 </script>

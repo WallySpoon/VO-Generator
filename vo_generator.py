@@ -182,6 +182,7 @@ def generate_from_table(
     api_key: str,
     voice_name: str,
     progress_cb,
+    output_dir: str = None,
 ):
     """Generate audio for each row, calling progress_cb with status dicts."""
     path = os.path.abspath(os.path.expanduser(path))
@@ -195,8 +196,9 @@ def generate_from_table(
         if vo_text and audio_name:
             rows.append({"vo_text": vo_text, "audio_file": audio_name})
 
-    doc_stem = os.path.splitext(os.path.basename(path))[0]
-    output_dir = os.path.join(os.path.dirname(path), f"{doc_stem}_audio")
+    if output_dir is None:
+        doc_stem = os.path.splitext(os.path.basename(path))[0]
+        output_dir = os.path.join(os.path.dirname(path), f"{doc_stem}_audio")
     os.makedirs(output_dir, exist_ok=True)
 
     try:
