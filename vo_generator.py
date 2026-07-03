@@ -138,6 +138,29 @@ class GenerationAborted(Exception):
     pass
 
 
+# VO text column keywords — order matters (most specific first)
+_VO_KEYWORDS = ["vo draft", "script", "vo text", "narration", "vo", "draft", "text", "copy"]
+_FILE_KEYWORDS = ["audio file", "filename", "file name", "audio", "file", "name", "output"]
+
+
+def _dedup_cells(row):
+    """Return unique cells from a docx row, collapsing merged cells."""
+    seen, result = set(), []
+    for cell in row.cells:
+        tc_id = id(cell._tc)
+        if tc_id not in seen:
+            seen.add(tc_id)
+            result.append(cell)
+    return result
+
+
+def _guess_cols(headers):
+    lower = [h.lower() for h in headers]
+    vo = next((j for kw in _VO_KEYWORDS for j, h in enumerate(lower) if kw in h), None)
+    fil = next((j for kw in _FILE_KEYWORDS for j, h in enumerate(lower) if kw in h), None)
+    return vo, fil
+
+
 def inspect_docx(path: str) -> dict:
     """Return table structure for UI column mapping."""
     path = os.path.abspath(os.path.expanduser(path))
@@ -146,22 +169,14 @@ def inspect_docx(path: str) -> dict:
     for i, table in enumerate(doc.tables):
         if not table.rows:
             continue
-        headers = [cell.text.strip() for cell in table.rows[0].cells]
-        headers_lower = [h.lower() for h in headers]
-
-        vo_guess = next((j for j, h in enumerate(headers_lower) if "vo draft" in h), None)
-        if vo_guess is None:
-            vo_guess = next((j for j, h in enumerate(headers_lower) if "vo" in h or "draft" in h), None)
-        file_guess = next((j for j, h in enumerate(headers_lower) if "audio file" in h), None)
-        if file_guess is None:
-            file_guess = next((j for j, h in enumerate(headers_lower) if "audio" in h or "file" in h), None)
-
+        headers = [c.text.strip() for c in _dedup_cells(table.rows[0])]
         preview = []
         for row in table.rows[1:6]:
-            preview.append([cell.text.strip() for cell in row.cells])
-
+            preview.append([c.text.strip() for c in _dedup_cells(row)])
+        vo_guess, file_guess = _guess_cols(headers)
         tables.append({
             "index": i,
+            "label": f"Table {i + 1}",
             "column_count": len(headers),
             "row_count": len(table.rows),
             "headers": headers,
@@ -169,8 +184,129 @@ def inspect_docx(path: str) -> dict:
             "suggested_vo_col": vo_guess,
             "suggested_file_col": file_guess,
         })
+    return {"tables": tables, "path": path, "filename": os.path.basename(path), "file_type": "docx"}
 
-    return {"tables": tables, "path": path, "filename": os.path.basename(path)}
+
+def inspect_pptx(path: str) -> dict:
+    """Return table structure from a PowerPoint file."""
+    from pptx import Presentation
+    path = os.path.abspath(os.path.expanduser(path))
+    prs = Presentation(path)
+    tables = []
+    idx = 0
+    for slide_num, slide in enumerate(prs.slides, 1):
+        for shape in slide.shapes:
+            if not shape.has_table:
+                continue
+            tbl = shape.table
+            col_count = len(tbl.columns)
+            headers = [tbl.cell(0, c).text.strip() for c in range(col_count)]
+            preview = []
+            for r in range(1, min(6, len(tbl.rows))):
+                preview.append([tbl.cell(r, c).text.strip() for c in range(col_count)])
+            vo_guess, file_guess = _guess_cols(headers)
+            tables.append({
+                "index": idx,
+                "label": f"Slide {slide_num}",
+                "column_count": col_count,
+                "row_count": len(tbl.rows),
+                "headers": headers,
+                "preview": preview,
+                "suggested_vo_col": vo_guess,
+                "suggested_file_col": file_guess,
+            })
+            idx += 1
+    return {"tables": tables, "path": path, "filename": os.path.basename(path), "file_type": "pptx"}
+
+
+def inspect_xlsx(path: str) -> dict:
+    """Return table structure from an Excel file."""
+    import openpyxl
+    path = os.path.abspath(os.path.expanduser(path))
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    tables = []
+    for idx, sheet_name in enumerate(wb.sheetnames):
+        ws = wb[sheet_name]
+        all_rows = list(ws.iter_rows(values_only=True))
+        if not all_rows:
+            continue
+        headers = [str(c).strip() if c is not None else "" for c in all_rows[0]]
+        preview = []
+        for row in all_rows[1:6]:
+            preview.append([str(c).strip() if c is not None else "" for c in row])
+        vo_guess, file_guess = _guess_cols(headers)
+        tables.append({
+            "index": idx,
+            "label": sheet_name,
+            "column_count": len(headers),
+            "row_count": ws.max_row,
+            "headers": headers,
+            "preview": preview,
+            "suggested_vo_col": vo_guess,
+            "suggested_file_col": file_guess,
+        })
+    wb.close()
+    return {"tables": tables, "path": path, "filename": os.path.basename(path), "file_type": "xlsx"}
+
+
+def inspect_document(path: str) -> dict:
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".docx":
+        return inspect_docx(path)
+    elif ext == ".pptx":
+        return inspect_pptx(path)
+    elif ext in (".xlsx", ".xls"):
+        return inspect_xlsx(path)
+    raise ValueError(f"Unsupported file type: {ext}")
+
+
+def _extract_rows(path: str, file_type: str, table_idx: int, vo_col: int, file_col: int, header_rows: int):
+    """Extract (vo_text, audio_file) pairs from any supported file type."""
+    if file_type == "docx":
+        doc = Document(path)
+        table = doc.tables[table_idx]
+        rows = []
+        for row in table.rows[header_rows:]:
+            cells = _dedup_cells(row)
+            if vo_col < len(cells) and file_col < len(cells):
+                vo_text = cells[vo_col].text.strip()
+                audio_name = cells[file_col].text.strip()
+                if vo_text and audio_name:
+                    rows.append({"vo_text": vo_text, "audio_file": audio_name})
+        return rows
+
+    elif file_type == "pptx":
+        from pptx import Presentation
+        prs = Presentation(path)
+        all_tables = [shape.table for slide in prs.slides for shape in slide.shapes if shape.has_table]
+        tbl = all_tables[table_idx]
+        rows = []
+        for r in range(header_rows, len(tbl.rows)):
+            col_count = len(tbl.columns)
+            if vo_col < col_count and file_col < col_count:
+                vo_text = tbl.cell(r, vo_col).text.strip()
+                audio_name = tbl.cell(r, file_col).text.strip()
+                if vo_text and audio_name:
+                    rows.append({"vo_text": vo_text, "audio_file": audio_name})
+        return rows
+
+    elif file_type in ("xlsx", "xls"):
+        import openpyxl
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        ws = wb[wb.sheetnames[table_idx]]
+        all_rows = list(ws.iter_rows(values_only=True))
+        wb.close()
+        rows = []
+        for row in all_rows[header_rows:]:
+            cells = [str(c).strip() if c is not None else "" for c in row]
+            if vo_col < len(cells) and file_col < len(cells):
+                vo_text = cells[vo_col]
+                audio_name = cells[file_col]
+                if vo_text and audio_name:
+                    rows.append({"vo_text": vo_text, "audio_file": audio_name})
+        return rows
+
+    raise ValueError(f"Unsupported file type: {file_type}")
 
 
 def generate_from_table(
@@ -183,18 +319,11 @@ def generate_from_table(
     voice_name: str,
     progress_cb,
     output_dir: str = None,
+    file_type: str = "docx",
 ):
     """Generate audio for each row, calling progress_cb with status dicts."""
     path = os.path.abspath(os.path.expanduser(path))
-    doc = Document(path)
-    table = doc.tables[table_idx]
-
-    rows = []
-    for row in table.rows[header_rows:]:
-        vo_text = row.cells[vo_col].text.strip()
-        audio_name = row.cells[file_col].text.strip()
-        if vo_text and audio_name:
-            rows.append({"vo_text": vo_text, "audio_file": audio_name})
+    rows = _extract_rows(path, file_type, table_idx, vo_col, file_col, header_rows)
 
     if output_dir is None:
         doc_stem = os.path.splitext(os.path.basename(path))[0]

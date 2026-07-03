@@ -18,7 +18,7 @@ from dotenv import load_dotenv, set_key
 from flask import Flask, Response, jsonify, render_template, request, send_file, stream_with_context
 from werkzeug.utils import secure_filename
 
-from vo_generator import GenerationAborted, generate_from_table, inspect_docx
+from vo_generator import GenerationAborted, generate_from_table, inspect_document
 
 load_dotenv()
 
@@ -74,13 +74,17 @@ def setup():
     return jsonify({"status": "ok"})
 
 
+SUPPORTED_EXTENSIONS = {".docx", ".pptx", ".xlsx"}
+
+
 @app.route("/upload", methods=["POST"])
 def upload():
     if "file" not in request.files:
         return jsonify({"error": "No file provided"}), 400
     f = request.files["file"]
-    if not f.filename.lower().endswith(".docx"):
-        return jsonify({"error": "Only .docx files are supported currently"}), 422
+    ext = os.path.splitext(f.filename)[1].lower()
+    if ext not in SUPPORTED_EXTENSIONS:
+        return jsonify({"error": f"Unsupported file type '{ext}'. Accepted: .docx, .pptx, .xlsx"}), 422
 
     session_id = str(uuid.uuid4())
     session_dir = os.path.join(UPLOAD_DIR, session_id)
@@ -91,7 +95,7 @@ def upload():
     f.save(doc_path)
 
     try:
-        result = inspect_docx(doc_path)
+        result = inspect_document(doc_path)
     except Exception as e:
         shutil.rmtree(session_dir, ignore_errors=True)
         return jsonify({"error": str(e)}), 500
@@ -103,7 +107,6 @@ def upload():
     result["session_id"] = session_id
     result["doc_path"] = doc_path
 
-    # Auto-cleanup session after 1 hour
     threading.Timer(3600, lambda: shutil.rmtree(session_dir, ignore_errors=True)).start()
 
     return jsonify(result)
@@ -126,6 +129,7 @@ def generate():
         return jsonify({"error": f"Invalid parameter: {e}"}), 400
 
     voice_name = (data.get("voice_name") or "Mikko").strip() or "Mikko"
+    file_type = (data.get("file_type") or "docx").strip()
     api_key = (data.get("api_key") or "").strip() or os.environ.get("ELEVENLABS_API_KEY")
 
     if not api_key:
@@ -155,6 +159,7 @@ def generate():
                 doc_path, table_idx, vo_col, file_col,
                 header_rows, api_key, voice_name, progress_cb,
                 output_dir=audio_dir,
+                file_type=file_type,
             )
         except Exception as e:
             try:

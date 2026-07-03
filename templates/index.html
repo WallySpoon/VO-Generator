@@ -165,9 +165,10 @@
              ondragleave="onDragLeave(event)"
              ondrop="onDrop(event)">
             <div class="upload-icon">📄</div>
-            <div class="upload-text">Drop your .docx here, or click to browse</div>
+            <div class="upload-text">Drop your file here, or click to browse</div>
+            <div style="font-size:0.75rem;color:#9ca3af;margin-top:4px;">.docx · .pptx · .xlsx</div>
             <div class="upload-name hidden" id="upload-name"></div>
-            <input type="file" id="file-input" accept=".docx" style="display:none" onchange="onFileSelect(event)">
+            <input type="file" id="file-input" accept=".docx,.pptx,.xlsx" style="display:none" onchange="onFileSelect(event)">
         </div>
         <div class="btn-row">
             <button class="btn btn-primary" id="btn-inspect" onclick="doUpload()">Inspect Document</button>
@@ -180,6 +181,10 @@
         <div class="card-header">
             <div class="step-badge">2</div>
             <div class="card-title">Column Mapping</div>
+        </div>
+        <div class="form-group hidden" id="table-selector-wrap">
+            <label for="sel-table">Table / Sheet</label>
+            <select id="sel-table" onchange="onTableChange()"></select>
         </div>
         <div class="form-grid">
             <div>
@@ -257,6 +262,7 @@ const state = {
     inspectResult: null,
     docPath: null,
     sessionId: null,
+    fileType: null,
     jobId: null,
     es: null,
     selectedFile: null,
@@ -310,8 +316,9 @@ function onDrop(e) {
 }
 function onFileSelect(e) { if (e.target.files[0]) setFile(e.target.files[0]); }
 function setFile(file) {
-    if (!file.name.toLowerCase().endsWith('.docx')) {
-        showErr('err-inspect', 'Only .docx files are supported.');
+    const validExts = ['.docx', '.pptx', '.xlsx'];
+    if (!validExts.some(ext => file.name.toLowerCase().endsWith(ext))) {
+        showErr('err-inspect', 'Supported file types: .docx, .pptx, .xlsx');
         return;
     }
     state.selectedFile = file;
@@ -335,6 +342,7 @@ async function doUpload() {
         state.inspectResult = data;
         state.docPath = data.doc_path;
         state.sessionId = data.session_id;
+        state.fileType = data.file_type;
         renderStep2(data);
         show('card-configure');
         document.getElementById('card-configure').scrollIntoView({ behavior: 'smooth' });
@@ -347,7 +355,37 @@ async function doUpload() {
 
 // ── Step 2: Configure ─────────────────────────────────
 function renderStep2(data) {
-    const table = data.tables[0];
+    const tableSel = document.getElementById('sel-table');
+    const tableWrap = document.getElementById('table-selector-wrap');
+
+    // Populate table selector
+    tableSel.innerHTML = '';
+    data.tables.forEach((t, i) => {
+        tableSel.innerHTML += `<option value="${i}">${t.label} — ${t.row_count} rows, ${t.column_count} cols</option>`;
+    });
+
+    // Default to last table (often the content table in multi-table docs)
+    tableSel.value = data.tables.length - 1;
+
+    // Only show selector if more than one table
+    if (data.tables.length > 1) {
+        tableWrap.classList.remove('hidden');
+    } else {
+        tableWrap.classList.add('hidden');
+    }
+
+    populateColumnDropdowns();
+}
+
+function onTableChange() {
+    populateColumnDropdowns();
+}
+
+function populateColumnDropdowns() {
+    const data = state.inspectResult;
+    if (!data) return;
+    const tableIdx = parseInt(document.getElementById('sel-table').value) || 0;
+    const table = data.tables[tableIdx];
     const headers = table.headers;
     const voSel = document.getElementById('sel-vo-col');
     const fileSel = document.getElementById('sel-file-col');
@@ -365,7 +403,8 @@ function renderStep2(data) {
 function updatePreview() {
     const data = state.inspectResult;
     if (!data) return;
-    const table = data.tables[0];
+    const tableIdx = parseInt(document.getElementById('sel-table').value) || 0;
+    const table = data.tables[tableIdx];
     const headers = table.headers;
     const voIdx = parseInt(document.getElementById('sel-vo-col').value);
     const fileIdx = parseInt(document.getElementById('sel-file-col').value);
@@ -408,7 +447,8 @@ async function doGenerate() {
     const body = {
         doc_path: state.docPath,
         session_id: state.sessionId,
-        table_idx: 0,
+        file_type: state.fileType,
+        table_idx: parseInt(document.getElementById('sel-table').value) || 0,
         vo_col: parseInt(document.getElementById('sel-vo-col').value),
         file_col: parseInt(document.getElementById('sel-file-col').value),
         header_rows: parseInt(document.getElementById('inp-header-rows').value) || 2,
