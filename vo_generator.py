@@ -2,7 +2,8 @@
 VO Generator — Batch Text-to-Speech from a Word Doc
 =====================================================
 Reads a .docx table with "VO draft" and "Audio file" columns,
-generates speech via Eleven Labs API using voice "Mikko",
+generates speech via Eleven Labs API using voice "Mikko"
+and the newest flagship model (override with --model),
 and saves .wav files (44.1 kHz, 16-bit mono) to the same
 folder as the source document.
 
@@ -20,6 +21,7 @@ Requirements:
 import argparse
 import io
 import os
+import re
 import struct
 import sys
 import time
@@ -35,7 +37,8 @@ load_dotenv()
 
 ELEVENLABS_BASE = "https://api.elevenlabs.io/v1"
 VOICE_NAME = "Mikko"
-MODEL_ID = "eleven_multilingual_v2"
+LATEST_MODEL = "latest"         # Resolve to the newest flagship model at run time
+DEFAULT_MODEL_ID = "eleven_v4"  # Fallback when the model list can't be read
 OUTPUT_FORMAT = "pcm_44100"  # Raw PCM; requires Pro tier for 44.1 kHz
 SAMPLE_RATE = 44100
 SAMPLE_WIDTH = 2  # 16-bit
@@ -66,6 +69,45 @@ def find_voice_id(api_key: str, voice_name: str) -> str:
     )
 
 
+def list_tts_models(api_key: str) -> list[dict]:
+    """Return the text-to-speech models available to this API key.
+
+    Requires the "Models (Read)" permission on the key.
+    """
+    resp = requests.get(f"{ELEVENLABS_BASE}/models", headers={"xi-api-key": api_key}, timeout=10)
+    resp.raise_for_status()
+    return [
+        {"model_id": m["model_id"], "name": m.get("name") or m["model_id"]}
+        for m in resp.json()
+        if m.get("can_do_text_to_speech") and not m.get("requires_alpha_access")
+    ]
+
+
+def pick_latest_model(models: list[dict]) -> str:
+    """Pick the newest flagship model (eleven_vN with the highest N).
+
+    The API has no release-date field, so version numbers in the ID are the
+    only signal. Variants like *_turbo or *_conversational are skipped since
+    they trade quality for latency.
+    """
+    best, best_ver = DEFAULT_MODEL_ID, -1
+    for m in models:
+        match = re.fullmatch(r"eleven_v(\d+)", m["model_id"])
+        if match and int(match.group(1)) > best_ver:
+            best, best_ver = m["model_id"], int(match.group(1))
+    return best
+
+
+def resolve_model(api_key: str, model_id: str = LATEST_MODEL) -> str:
+    """Return a concrete model ID, resolving "latest" via the models endpoint."""
+    if model_id and model_id != LATEST_MODEL:
+        return model_id
+    try:
+        return pick_latest_model(list_tts_models(api_key))
+    except Exception:
+        return DEFAULT_MODEL_ID
+
+
 def pcm_to_wav(pcm_data: bytes, out_path: str):
     """Wrap raw PCM bytes in a WAV container and write to disk."""
     with wave.open(out_path, "wb") as wf:
@@ -75,13 +117,13 @@ def pcm_to_wav(pcm_data: bytes, out_path: str):
         wf.writeframes(pcm_data)
 
 
-def generate_speech(api_key: str, voice_id: str, text: str) -> bytes:
+def generate_speech(api_key: str, voice_id: str, text: str, model_id: str = DEFAULT_MODEL_ID) -> bytes:
     """Call the Eleven Labs TTS endpoint and return raw PCM bytes."""
     url = f"{ELEVENLABS_BASE}/text-to-speech/{voice_id}"
     params = {"output_format": OUTPUT_FORMAT}
     payload = {
         "text": text,
-        "model_id": MODEL_ID,
+        "model_id": model_id,
     }
     resp = requests.post(
         url, headers=get_headers(api_key), params=params, json=payload
@@ -320,6 +362,7 @@ def generate_from_table(
     progress_cb,
     output_dir: str = None,
     file_type: str = "docx",
+    model_id: str = LATEST_MODEL,
 ):
     """Generate audio for each row, calling progress_cb with status dicts."""
     path = os.path.abspath(os.path.expanduser(path))
@@ -335,9 +378,10 @@ def generate_from_table(
     except Exception as e:
         progress_cb({"type": "error", "message": str(e)})
         return
+    model_id = resolve_model(api_key, model_id)
 
     total = len(rows)
-    progress_cb({"type": "start", "total": total, "output_dir": output_dir, "voice": voice_name})
+    progress_cb({"type": "start", "total": total, "output_dir": output_dir, "voice": voice_name, "model": model_id})
 
     successes = 0
     failures = 0
@@ -348,7 +392,7 @@ def generate_from_table(
 
         try:
             progress_cb({"type": "progress", "current": i, "total": total, "filename": fname, "status": "generating"})
-            pcm_data = generate_speech(api_key, voice_id, row["vo_text"])
+            pcm_data = generate_speech(api_key, voice_id, row["vo_text"], model_id)
             pcm_to_wav(pcm_data, out_path)
             duration = round(len(pcm_data) / (SAMPLE_RATE * SAMPLE_WIDTH * CHANNELS), 1)
             progress_cb({"type": "progress", "current": i, "total": total, "filename": fname, "status": "done", "duration": duration})
@@ -382,6 +426,11 @@ def main():
         "--voice",
         default=VOICE_NAME,
         help=f'Voice name to use (default: "{VOICE_NAME}")',
+    )
+    parser.add_argument(
+        "--model",
+        default=LATEST_MODEL,
+        help='Model ID, e.g. "eleven_v4" (default: "latest" = newest flagship model)',
     )
     parser.add_argument(
         "--dry-run",
@@ -421,7 +470,9 @@ def main():
     # ── Resolve voice ──
     print(f'\n🔍 Looking up voice "{args.voice}"...')
     voice_id = find_voice_id(args.api_key, args.voice)
-    print(f"   Found: {voice_id}\n")
+    print(f"   Found: {voice_id}")
+    model_id = resolve_model(args.api_key, args.model)
+    print(f"   Model: {model_id}\n")
 
     # ── Generate audio ──
     successes = 0
@@ -436,7 +487,7 @@ def main():
         print(f"            Text: \"{text_preview}\"")
 
         try:
-            pcm_data = generate_speech(args.api_key, voice_id, row["vo_text"])
+            pcm_data = generate_speech(args.api_key, voice_id, row["vo_text"], model_id)
             pcm_to_wav(pcm_data, out_path)
             duration = len(pcm_data) / (SAMPLE_RATE * SAMPLE_WIDTH * CHANNELS)
             print(f"            ✅ Saved ({duration:.1f}s audio)\n")
