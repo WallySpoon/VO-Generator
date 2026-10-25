@@ -206,6 +206,12 @@
                 <input type="text" id="inp-voice" value="Mikko">
             </div>
         </div>
+        <div class="form-group">
+            <label for="sel-model">Model</label>
+            <select id="sel-model">
+                <option value="latest">Latest (auto)</option>
+            </select>
+        </div>
         <div style="margin-bottom:16px;">
             <button class="link-btn" onclick="toggleApiKey()" id="api-key-toggle">+ Override API key</button>
             <div class="form-group hidden" id="api-key-field" style="margin-top:10px;">
@@ -345,6 +351,7 @@ async function doUpload() {
         state.fileType = data.file_type;
         renderStep2(data);
         show('card-configure');
+        loadModels();
         document.getElementById('card-configure').scrollIntoView({ behavior: 'smooth' });
     } catch (e) {
         showErr('err-inspect', e.message);
@@ -439,6 +446,23 @@ function toggleApiKey() {
 
 function goBack() { hide('card-configure'); }
 
+async function loadModels() {
+    const sel = document.getElementById('sel-model');
+    if (sel.dataset.loaded) return;
+    try {
+        const data = await (await fetch('/models')).json();
+        const latestName = (data.models.find(m => m.model_id === data.latest) || {}).name || data.latest;
+        sel.options[0].textContent = `Latest (auto) — ${latestName}`;
+        for (const m of data.models) {
+            const opt = document.createElement('option');
+            opt.value = m.model_id;
+            opt.textContent = `${m.name} (${m.model_id})`;
+            sel.appendChild(opt);
+        }
+        sel.dataset.loaded = '1';
+    } catch (e) { /* keep "Latest (auto)" — the server falls back on its own */ }
+}
+
 // ── Step 3: Generate ──────────────────────────────────
 async function doGenerate() {
     clearErr('err-generate');
@@ -453,6 +477,7 @@ async function doGenerate() {
         file_col: parseInt(document.getElementById('sel-file-col').value),
         header_rows: parseInt(document.getElementById('inp-header-rows').value) || 2,
         voice_name: document.getElementById('inp-voice').value.trim() || 'Mikko',
+        model_id: document.getElementById('sel-model').value,
         api_key: document.getElementById('inp-api-key').value.trim(),
     };
     try {
@@ -498,7 +523,7 @@ function handleEvent(msg) {
     const log = document.getElementById('log');
 
     if (msg.type === 'start') {
-        label.textContent = 'Generating…';
+        label.textContent = msg.model ? `Generating with ${msg.model}…` : 'Generating…';
         count.textContent = `0 / ${msg.total}`;
     } else if (msg.type === 'progress') {
         count.textContent = `${msg.current} / ${msg.total}`;

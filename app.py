@@ -18,7 +18,10 @@ from dotenv import load_dotenv, set_key
 from flask import Flask, Response, jsonify, render_template, request, send_file, stream_with_context
 from werkzeug.utils import secure_filename
 
-from vo_generator import GenerationAborted, generate_from_table, inspect_document
+from vo_generator import (
+    DEFAULT_MODEL_ID, LATEST_MODEL, GenerationAborted, generate_from_table,
+    inspect_document, list_tts_models, pick_latest_model,
+)
 
 load_dotenv()
 
@@ -72,6 +75,19 @@ def setup():
     set_key(ENV_PATH, "ELEVENLABS_API_KEY", api_key)
     os.environ["ELEVENLABS_API_KEY"] = api_key
     return jsonify({"status": "ok"})
+
+
+@app.route("/models")
+def models():
+    api_key = os.environ.get("ELEVENLABS_API_KEY")
+    if not api_key:
+        return jsonify({"models": [], "latest": DEFAULT_MODEL_ID})
+    try:
+        available = list_tts_models(api_key)
+    except Exception:
+        # Key likely lacks "Models (Read)" — generation still works via the fallback
+        return jsonify({"models": [], "latest": DEFAULT_MODEL_ID, "warning": "Could not list models"})
+    return jsonify({"models": available, "latest": pick_latest_model(available)})
 
 
 SUPPORTED_EXTENSIONS = {".docx", ".pptx", ".xlsx"}
@@ -130,6 +146,7 @@ def generate():
 
     voice_name = (data.get("voice_name") or "Mikko").strip() or "Mikko"
     file_type = (data.get("file_type") or "docx").strip()
+    model_id = (data.get("model_id") or LATEST_MODEL).strip()
     api_key = (data.get("api_key") or "").strip() or os.environ.get("ELEVENLABS_API_KEY")
 
     if not api_key:
@@ -160,6 +177,7 @@ def generate():
                 header_rows, api_key, voice_name, progress_cb,
                 output_dir=audio_dir,
                 file_type=file_type,
+                model_id=model_id,
             )
         except Exception as e:
             try:
@@ -171,7 +189,7 @@ def generate():
                 q.put_nowait(None)
             except queue.Full:
                 pass
-            threading.Timer(300, lambda: _jobs.pop(job_id, None)).start()
+            threading.Timer(3600, lambda: _jobs.pop(job_id, None)).start()
 
     threading.Thread(target=run, daemon=True).start()
     return jsonify({"job_id": job_id}), 202

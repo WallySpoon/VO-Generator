@@ -1,6 +1,6 @@
 # VO Generator
 
-Reads a Word doc table with **VO draft** and **Audio file** columns, generates speech via the Eleven Labs API using the voice **Mikko**, and returns a downloadable `.zip` of `.wav` files (44.1 kHz, 16-bit mono).
+Reads a Word doc table with **VO draft** and **Audio file** columns, generates speech via the Eleven Labs API using the voice **Mikko** and the newest flagship model (currently **Eleven v4**), and returns a downloadable `.zip` of `.wav` files (44.1 kHz, 16-bit mono).
 
 ---
 
@@ -66,6 +66,7 @@ You'll need a free or paid [Eleven Labs](https://elevenlabs.io) account.
    - Text to Speech → **Access**
    - Voice Generation → **Access**
    - Voices → **Read**
+   - Models → **Read** (lets the app find the newest model and fill the model dropdown; without it, the app falls back to `eleven_v4`)
 3. Paste the key into the setup screen on first launch
 
 ---
